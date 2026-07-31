@@ -4,7 +4,7 @@
 
 A complete, self-contained SystemVerilog RTL implementation of a classic **Whack-a-Mole** arcade game, designed for FPGA development boards with push buttons, LEDs, a 6-digit 7-segment display, and a buzzer.
 
-**The classic game has been fully verified in hardware on a Xilinx Artix-7 FPGA** (`xc7a200tfbg484-2`, Vivado 2023.2): synthesized, placed, routed, and played on the board. The later-added hard mode is verified by a self-checking simulation testbench plus re-synthesis (see the verification section). Post-route timing, utilization, and power reports are included in the [`assets/`](./assets) folder.
+**The original classic game has been fully verified in hardware on a Xilinx Artix-7 FPGA** (`xc7a200tfbg484-2`, Vivado 2023.2): synthesized, placed, routed, and played on the board. Later additions — hard mode and the restart-on-clear wave pacing — are verified by a self-checking simulation testbench plus re-synthesis (see the verification section). Post-route timing, utilization, and power reports are included in the [`assets/`](./assets) folder.
 
 ---
 
@@ -34,13 +34,14 @@ The game uses 4 push buttons (KEY4–KEY1), 4 LEDs (LED4–LED1), a 6-digit 7-se
 - Pressing **any** of KEY4–KEY1 starts the game.
 
 ### Running state
-- **SM4–SM1** are the four mole holes. Each round (1 second), exactly one mole pops up at a pseudo-random position (two moles in hard mode — see below; the first mole appears one round after the start key is pressed):
+- **SM4–SM1** are the four mole holes. Each wave, exactly one mole pops up at a pseudo-random position and lives for at most 1 second (two moles in hard mode — see below; the first wave appears one second after the start key is pressed):
   - **Small mole** (`u`-shaped pattern, bottom segments lit) — needs **1 hit** to clear.
   - **Big mole** (all segments lit, an `8` pattern) — needs **2 hits** to clear (first hit turns it into a small mole).
   - Empty holes stay blank.
 - **KEY4–KEY1** map one-to-one to SM4–SM1. Pressing a key delivers one hit to that hole.
 - **SM6, SM5** show the cleared count **N**, incremented each time a mole is fully cleared.
 - **LED4–LED1** show the remaining chances **M** (initially 4). If a mole survives until the end of its round, it disappears by itself, **M decreases by 1**, one LED turns off, and the buzzer emits a short 500 Hz beep.
+- Wave pacing: the 1-second round timer **restarts whenever the board is cleared** — kill every mole and the next wave appears exactly one second after your final hit, guaranteeing a breathing pause; let a mole survive and the next wave spawns immediately when the round expires.
 - **Win**: N reaches **20** → the buzzer plays a cheerful high tone (1 kHz) for 1.8 s, then the game returns to the initial state.
 - **Lose**: M reaches **0** (all LEDs off) → the buzzer plays a sad low tone (200 Hz) for 1.8 s, then the game returns to the initial state.
 
@@ -91,21 +92,19 @@ Board-dependent properties — key/segment/digit polarity and game pacing — ar
 
 The design is a single module organized into clearly separated functional blocks, all in one clock domain (`clk`) with an asynchronous active-low reset:
 
-```
-              ┌─────────────────────────────────────────────────────┐
-              │                 whack_a_mole_game                   │
-              │                                                     │
- key[3:0] ───►│ 1-ms-sampled ──► edge      ┌──────────────┐         │
-              │ 8-ms debounce    detector ─►│              │────────►│ led[3:0]
-              │                             │  Game FSM +  │         │
-              │ free-running ──────────────►│  scoreboard  │         │
-              │ 8-bit LFSR                  │ (chances M,  │         │
-              │                             │  kills N,    │  ┌────► │ seg[6:0]
-              │ 1-ms tick ┬───► round timer─►│  mole HP×4) │──┤      │
-              │ generator └───► scan index ─┼─────────────►│  └────► │ dig[5:0]
-              │                             └──────┬───────┘         │
-              │                    tone generator ◄┘ ───────────────►│ buzzer
-              └─────────────────────────────────────────────────────┘
+```mermaid
+flowchart LR
+    key[/"key[3:0]"/] --> DEB["8 ms debounce<br>(sampled on the 1 ms tick)"]
+    DEB --> EDGE["edge detect<br>(one pulse per press)"] --> CORE
+    TICK["1 ms tick generator"] -.sampling enable.-> DEB
+    TICK --> SCAN["display scan index"] --> MUX
+    LFSR["free-running 8-bit LFSR"] --> CORE
+    CORE["Game FSM + scoreboard<br>round timer (counts clk cycles, restarts on board clear)<br>chances M · kills N · mole HP ×4"]
+    CORE --> led[/"led[3:0]"/]
+    CORE --> MUX["digit mux + 7-seg decoder"]
+    MUX --> seg[/"seg[6:0]"/]
+    MUX --> dig[/"dig[5:0]"/]
+    CORE --> TONE["tone generator"] --> buzzer[/"buzzer"/]
 ```
 
 ### 1. Timing backbone — 1 ms tick generator
@@ -141,7 +140,8 @@ Each hole carries a 2-bit **hit-point counter** (`mole_hp[i]`): `0` = empty, `1`
 
 - A hit on a hole with `hp > 0` decrements it; the decrement `1 → 0` is the "fully cleared" event that increments the score **N**. A big mole (`2`) therefore naturally requires two hits, and the first hit visually shrinks it to a small mole.
 - In hard mode, two moles can be fully cleared in the very same clock cycle (two debounced key edges can land on the same 1 ms sampling tick), so the per-position kill events are summed combinationally (`kills_now`) and added to **N** in one shot — incrementing N inside the per-position loop would silently drop one of two simultaneous kills.
-- On each 1-second round boundary: if **any** hole still has `hp > 0`, one chance **M** is deducted and a 150 ms beep is triggered; then a fresh mole is spawned from the LFSR (which also clears all other holes).
+- On round expiry: if any mole is still alive *after the current cycle's hits settle* (`any_alive_next` — so a kill landing on the very expiry cycle is never wrongly penalized), one chance **M** is deducted and a 150 ms beep is triggered; then a fresh wave is spawned from the LFSR (which also clears all other holes).
+- When the player empties the board mid-round (`board_cleared_now`), the round counter restarts, so the next wave appears one full round after the final hit rather than on a fixed global cadence — clearing a mole at 0.9 s no longer means facing a new one 0.1 s later.
 - Since spawn assignments are placed after hit assignments in the same `always_ff` block, SystemVerilog last-assignment-wins semantics give the round-boundary spawn correct priority on the rare cycle where both fire.
 
 ### 6. Display path — multiplexed 7-segment scan
@@ -156,7 +156,7 @@ A single programmable divider produces a 50 % duty-cycle square wave whose perio
 
 The design was synthesized and implemented with **Vivado 2023.2** targeting **`xc7a200tfbg484-2`** (Artix-7) at a 50 MHz system clock, and verified on the actual development board — game flow, hit detection, scoring, life deduction, display, and all three buzzer tones behave as specified.
 
-The hard-mode feature was added after that board bring-up. It is verified by a self-checking xsim testbench that auto-plays the game — covering two-moles-per-round spawning, the at-most-one-big-mole invariant, simultaneous double-kill scoring, the exactly-one-chance-per-round rule, and the win/lose paths in both modes (194 checks, all passing) — plus a clean re-synthesis for the same part (0 errors / 0 critical warnings). The reports below correspond to the hardware-verified classic-mode build.
+The hard-mode feature and the restart-on-clear wave pacing were added after that board bring-up. They are verified by a self-checking xsim testbench that auto-plays the game — covering two-moles-per-round spawning, the at-most-one-big-mole invariant, simultaneous double-kill scoring, the round-timer restart and empty-board rest period after every clear, the exactly-one-chance-per-round rule, and the win/lose paths in both modes (250 checks, all passing) — plus a clean re-synthesis for the same part (0 errors / 0 critical warnings). The reports below correspond to the hardware-verified original build.
 
 ### Post-route timing (see [`assets/whack_a_mole_game_timing_summary_routed.rpt`](./assets/whack_a_mole_game_timing_summary_routed.rpt))
 

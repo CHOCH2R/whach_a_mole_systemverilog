@@ -181,11 +181,24 @@ module whack_a_mole_game #(
                 kills_now += 3'd1;
     end
 
+    // Whether each hole still has a live mole after this cycle's hits are applied
+    // (used for the round-expiry chance check and for board-cleared detection)
+    logic [3:0] mole_alive_next;
+    logic any_alive_now, any_alive_next, board_cleared_now;
+    always_comb begin
+        for (int i = 0; i < 4; i++)
+            mole_alive_next[i] = (mole_hp[i] != 2'd0) && !(key_press[i] && mole_hp[i] == 2'd1);
+    end
+    assign any_alive_now     = (mole_hp[0] != 2'd0) || (mole_hp[1] != 2'd0) || (mole_hp[2] != 2'd0) || (mole_hp[3] != 2'd0);
+    assign any_alive_next    = |mole_alive_next;
+    assign board_cleared_now = any_alive_now && !any_alive_next;
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             chance_m <= MAX_CHANCE[2:0];
             kill_n   <= 0;
             round_cnt <= 0;
+            music_cnt <= 0;
             short_beep_active <= 0;
             beep_cnt <= 0;
             for(int i=0; i<4; i++) mole_hp[i] <= 0;
@@ -210,12 +223,16 @@ module whack_a_mole_game #(
                     end
                     kill_n <= kill_n + kills_now; // HP going 1 to 0 means fully cleared, add to score
 
-                    // --- Round timing and chance deduction ---
-                    if (round_cnt >= ROUND_TICKS - 1) begin
+                    // --- Round timing, chance deduction and mole spawning ---
+                    if (board_cleared_now) begin
+                        // All moles cleared (even on the very expiry cycle): restart the round
+                        // timer so the next wave appears a full round after the final hit
+                        round_cnt <= 0;
+                    end else if (round_cnt >= ROUND_TICKS - 1) begin
                         round_cnt <= 0;
 
-                        // If a mole is still alive when the round ends, deduct 1 chance
-                        if (|{mole_hp[0], mole_hp[1], mole_hp[2], mole_hp[3]}) begin
+                        // If a mole survives when the round ends, deduct 1 chance (judged on the post-hit state)
+                        if (any_alive_next) begin
                             if (chance_m > 0) chance_m <= chance_m - 1;
                             short_beep_active <= 1; // Trigger the short beep
                         end

@@ -180,11 +180,23 @@ module whack_a_mole_game #(
                 kills_now += 3'd1;
     end
 
+    // 本拍打击结算后各位置是否仍有地鼠存活（用于到期扣血判定与清屏检测）
+    logic [3:0] mole_alive_next;
+    logic any_alive_now, any_alive_next, board_cleared_now;
+    always_comb begin
+        for (int i = 0; i < 4; i++)
+            mole_alive_next[i] = (mole_hp[i] != 2'd0) && !(key_press[i] && mole_hp[i] == 2'd1);
+    end
+    assign any_alive_now     = (mole_hp[0] != 2'd0) || (mole_hp[1] != 2'd0) || (mole_hp[2] != 2'd0) || (mole_hp[3] != 2'd0);
+    assign any_alive_next    = |mole_alive_next;
+    assign board_cleared_now = any_alive_now && !any_alive_next;
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             chance_m <= MAX_CHANCE[2:0];
             kill_n   <= 0;
             round_cnt <= 0;
+            music_cnt <= 0;
             short_beep_active <= 0;
             beep_cnt <= 0;
             for(int i=0; i<4; i++) mole_hp[i] <= 0;
@@ -209,12 +221,16 @@ module whack_a_mole_game #(
                     end
                     kill_n <= kill_n + kills_now; // 血量由1变0即完全消除并计分
 
-                    // --- 回合计时与机会扣除 ---
-                    if (round_cnt >= ROUND_TICKS - 1) begin
+                    // --- 回合计时、机会扣除与生成新地鼠 ---
+                    if (board_cleared_now) begin
+                        // 地鼠被全部消灭（哪怕恰好在到期那一拍）：回合计时器清零
+                        // 重新计时，下一波地鼠在最后一击的一个完整回合之后才出现
+                        round_cnt <= 0;
+                    end else if (round_cnt >= ROUND_TICKS - 1) begin
                         round_cnt <= 0;
                         
-                        // 如果回合结束还有地鼠没打掉，扣 1 次机会
-                        if (|{mole_hp[0], mole_hp[1], mole_hp[2], mole_hp[3]}) begin
+                        // 回合到期仍有地鼠存活则扣 1 次机会（按本拍打击结算后的状态判断）
+                        if (any_alive_next) begin
                             if (chance_m > 0) chance_m <= chance_m - 1;
                             short_beep_active <= 1; // 触发短响
                         end
