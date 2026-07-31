@@ -4,7 +4,7 @@
 
 A complete, self-contained SystemVerilog RTL implementation of a classic **Whack-a-Mole** arcade game, designed for FPGA development boards with push buttons, LEDs, a 6-digit 7-segment display, and a buzzer.
 
-**This design has been fully verified in hardware on a Xilinx Artix-7 FPGA** (`xc7a200tfbg484-2`, Vivado 2023.2): synthesized, placed, routed, and played on the board. Post-route timing, utilization, and power reports are included in the [`assets/`](./assets) folder.
+**The classic game has been fully verified in hardware on a Xilinx Artix-7 FPGA** (`xc7a200tfbg484-2`, Vivado 2023.2): synthesized, placed, routed, and played on the board. The later-added hard mode is verified by a self-checking simulation testbench plus re-synthesis (see the verification section). Post-route timing, utilization, and power reports are included in the [`assets/`](./assets) folder.
 
 ---
 
@@ -34,7 +34,7 @@ The game uses 4 push buttons (KEY4–KEY1), 4 LEDs (LED4–LED1), a 6-digit 7-se
 - Pressing **any** of KEY4–KEY1 starts the game.
 
 ### Running state
-- **SM4–SM1** are the four mole holes. Each round (1 second), exactly one mole pops up at a pseudo-random position (the first mole appears one round after the start key is pressed):
+- **SM4–SM1** are the four mole holes. Each round (1 second), exactly one mole pops up at a pseudo-random position (two moles in hard mode — see below; the first mole appears one round after the start key is pressed):
   - **Small mole** (`u`-shaped pattern, bottom segments lit) — needs **1 hit** to clear.
   - **Big mole** (all segments lit, an `8` pattern) — needs **2 hits** to clear (first hit turns it into a small mole).
   - Empty holes stay blank.
@@ -43,6 +43,16 @@ The game uses 4 push buttons (KEY4–KEY1), 4 LEDs (LED4–LED1), a 6-digit 7-se
 - **LED4–LED1** show the remaining chances **M** (initially 4). If a mole survives until the end of its round, it disappears by itself, **M decreases by 1**, one LED turns off, and the buzzer emits a short 500 Hz beep.
 - **Win**: N reaches **20** → the buzzer plays a cheerful high tone (1 kHz) for 1.8 s, then the game returns to the initial state.
 - **Lose**: M reaches **0** (all LEDs off) → the buzzer plays a sad low tone (200 Hz) for 1.8 s, then the game returns to the initial state.
+
+### Hard mode
+
+Driving the `hard_mode` input high (e.g. from a DIP switch) enables hard mode:
+
+- Every round **two moles** pop up, always at two *different* holes.
+- **At most one big mole** is ever on screen — the second mole of each pair is always small.
+- Everything else is unchanged: one hit clears a small mole, two clear a big one, N grows once per cleared mole, and exactly one chance M is lost per round if *any* mole survives.
+
+Tie `hard_mode` low for the classic single-mole game. The switch goes through a 2-flop synchronizer and takes effect from the next spawn.
 
 ---
 
@@ -64,6 +74,8 @@ module whack_a_mole_game #(
     input  logic       clk,     // System clock (50 MHz by default)
     input  logic       rst_n,   // Asynchronous active-low reset
     input  logic [3:0] key,     // 4 hit keys (KEY_ACTIVE_LOW selects polarity)
+    input  logic       hard_mode, // 1: hard mode — two moles per round, at most one big
+
     output logic [3:0] led,     // Remaining-chances LEDs
     output logic [6:0] seg,     // 7-segment segments {a,b,c,d,e,f,g}
     output logic [5:0] dig,     // Digit enables, dig[0]=SM1 ... dig[5]=SM6
@@ -105,7 +117,7 @@ Each of the 4 keys has an 8-bit shift register sampled once per millisecond. A k
 ### 3. Pseudo-random mole generation — free-running LFSR
 An 8-bit Fibonacci LFSR (taps 8, 6, 5, 4; seed `8'hA5`) runs at the full 50 MHz clock **continuously, including while the game idles in the start screen**. Because the number of clock cycles a human spends before pressing "start" is unpredictable at 50 MHz granularity, the LFSR state at game start is effectively a true-random seed — every playthrough gets a different mole sequence, without any dedicated entropy hardware.
 
-When a round expires, `lfsr[1:0]` selects which of the 4 holes spawns the mole and `lfsr[3:2] == 2'b11` decides whether it is a big mole (25 % probability) or a small one (75 %).
+When a round expires, `lfsr[1:0]` selects which of the 4 holes spawns the mole and `lfsr[3:2] == 2'b11` decides whether it is a big mole (25 % probability) or a small one (75 %). In hard mode a second hole opens at `spawn_pos1 ^ offset`, where the offset comes from `lfsr[5:4]` and is forced non-zero — XOR-ing with a non-zero value can never map a position onto itself, so the two moles are guaranteed to occupy different holes. The second mole is always small, which enforces the at-most-one-big-mole rule by construction.
 
 ### 4. Game FSM — 4 states
 ```mermaid
@@ -128,6 +140,7 @@ The FSM uses the standard two-process style: a sequential state register and a c
 Each hole carries a 2-bit **hit-point counter** (`mole_hp[i]`): `0` = empty, `1` = small mole, `2` = big mole. This single encoding elegantly unifies the rules:
 
 - A hit on a hole with `hp > 0` decrements it; the decrement `1 → 0` is the "fully cleared" event that increments the score **N**. A big mole (`2`) therefore naturally requires two hits, and the first hit visually shrinks it to a small mole.
+- In hard mode, two moles can be fully cleared in the very same clock cycle (two debounced key edges can land on the same 1 ms sampling tick), so the per-position kill events are summed combinationally (`kills_now`) and added to **N** in one shot — incrementing N inside the per-position loop would silently drop one of two simultaneous kills.
 - On each 1-second round boundary: if **any** hole still has `hp > 0`, one chance **M** is deducted and a 150 ms beep is triggered; then a fresh mole is spawned from the LFSR (which also clears all other holes).
 - Since spawn assignments are placed after hit assignments in the same `always_ff` block, SystemVerilog last-assignment-wins semantics give the round-boundary spawn correct priority on the rare cycle where both fire.
 
@@ -142,6 +155,8 @@ A single programmable divider produces a 50 % duty-cycle square wave whose perio
 ## Hardware Verification on Xilinx Artix-7
 
 The design was synthesized and implemented with **Vivado 2023.2** targeting **`xc7a200tfbg484-2`** (Artix-7) at a 50 MHz system clock, and verified on the actual development board — game flow, hit detection, scoring, life deduction, display, and all three buzzer tones behave as specified.
+
+The hard-mode feature was added after that board bring-up. It is verified by a self-checking xsim testbench that auto-plays the game — covering two-moles-per-round spawning, the at-most-one-big-mole invariant, simultaneous double-kill scoring, the exactly-one-chance-per-round rule, and the win/lose paths in both modes (194 checks, all passing) — plus a clean re-synthesis for the same part (0 errors / 0 critical warnings). The reports below correspond to the hardware-verified classic-mode build.
 
 ### Post-route timing (see [`assets/whack_a_mole_game_timing_summary_routed.rpt`](./assets/whack_a_mole_game_timing_summary_routed.rpt))
 
@@ -179,7 +194,7 @@ The whole game fits in under 200 LUTs and 200 flip-flops with no BRAM or DSP usa
 ## Porting / Using the Design
 
 1. Add `whach_a_mole.sv` (or `whach_a_mole_cn.sv`) to your Vivado project and set `whack_a_mole_game` as the top module.
-2. Write an XDC for your board: constrain `clk` to your oscillator pin with a matching `create_clock`, and assign `key[3:0]`, `led[3:0]`, `seg[6:0]`, `dig[5:0]`, `buzzer`, `rst_n` to the appropriate pins. If your keys are mechanical switches to GND, enable internal pull-ups (`set_property PULLUP TRUE`).
+2. Write an XDC for your board: constrain `clk` to your oscillator pin with a matching `create_clock`, and assign `key[3:0]`, `led[3:0]`, `seg[6:0]`, `dig[5:0]`, `buzzer`, `rst_n`, and `hard_mode` (a DIP switch — or tie it low for the classic game) to the appropriate pins. If your keys are mechanical switches to GND, enable internal pull-ups (`set_property PULLUP TRUE`).
 3. Adjust the parameters if your board differs from the reference setup:
    - `CLK_FREQ_HZ` — your actual clock frequency. The round / beep / music / scan time constants derive from it automatically, but two 50 MHz assumptions in the RTL need attention when you change it: the three buzzer tone dividers (`18'd50000/250000/100000`) are fixed literals and must be retuned to keep the 1 kHz / 200 Hz / 500 Hz tones, and the 16-bit `scan_div_cnt` counter limits `CLK_FREQ_HZ` to at most 65.535 MHz unless you widen it;
    - `KEY_ACTIVE_LOW` / `SEG_ACTIVE_LOW` / `DIG_ACTIVE_LOW` — polarity of your keys and display;

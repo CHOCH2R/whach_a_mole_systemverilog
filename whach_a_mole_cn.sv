@@ -17,6 +17,7 @@ module whack_a_mole_game #(
     input  logic        rst_n,
 
     input  logic [3:0]  key,     // 4个打击按键，对应SM4~SM1位置
+    input  logic        hard_mode, // 困难模式开关：1=每轮同时出现两只地鼠（至多一只大地鼠），0=经典单只模式
 
     output logic [3:0]  led,     // 4个LED，代表剩余生命值M
     output logic [6:0]  seg,     // 数码管段选（a-g）
@@ -49,7 +50,7 @@ module whack_a_mole_game #(
     // ============================================================
     logic [$clog2(ROUND_TICKS):0] round_cnt;    // 每轮地鼠计秒器
     logic [2:0] chance_m;                       // 剩余机会M (0~4)
-    logic [5:0] kill_n;                         // 消除数量N (0~20)
+    logic [5:0] kill_n;                         // 消除数量N (0~21，困难模式同拍双杀可超出目标1个)
     logic [1:0] mole_hp [3:0];                  // 4个位置地鼠的血量(0:无, 1:小, 2:大)
     logic [7:0] lfsr;                           // 线性反馈移位寄存器，用于产生伪随机数
     
@@ -127,6 +128,19 @@ module whack_a_mole_game #(
         end
     end
 
+    // 困难模式开关同步：外部拨码开关为异步输入，打两拍消除亚稳态
+    logic [1:0] hard_mode_sync;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) hard_mode_sync <= 2'b00;
+        else        hard_mode_sync <= {hard_mode_sync[0], hard_mode};
+    end
+
+    // 地鼠生成位置译码：第一只位置取 lfsr[1:0]；
+    // 第二只位置 = 第一只位置 异或 一个非零偏移，保证两只位置必然不同
+    logic [1:0] spawn_pos1, spawn_pos2;
+    assign spawn_pos1 = lfsr[1:0];
+    assign spawn_pos2 = spawn_pos1 ^ ((lfsr[5:4] == 2'b00) ? 2'b01 : lfsr[5:4]);
+
     // ============================================================
     // 7. 游戏主逻辑状态机
     // ============================================================
@@ -156,6 +170,16 @@ module whack_a_mole_game #(
     // ============================================================
     // 8. 游戏核心计数与判定逻辑
     // ============================================================
+    // 本拍完全消除的地鼠数（血量 1->0）。困难模式下两只地鼠可能在
+    // 同一拍被同时打死，必须并行累加，不能在循环里对 kill_n 重复赋值
+    logic [2:0] kills_now;
+    always_comb begin
+        kills_now = '0;
+        for (int i = 0; i < 4; i++)
+            if (key_press[i] && mole_hp[i] == 2'd1)
+                kills_now += 3'd1;
+    end
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             chance_m <= MAX_CHANCE[2:0];
@@ -180,12 +204,10 @@ module whack_a_mole_game #(
                     // --- 打击判定 ---
                     for (int i=0; i<4; i++) begin
                         if (key_press[i] && mole_hp[i] > 0) begin
-                            if (mole_hp[i] == 2'd1) begin
-                                kill_n <= kill_n + 1; // 血量由1变0，完全消除并计分
-                            end
                             mole_hp[i] <= mole_hp[i] - 1'b1; // 减血（2->1 或 1->0）
                         end
                     end
+                    kill_n <= kill_n + kills_now; // 血量由1变0即完全消除并计分
 
                     // --- 回合计时与机会扣除 ---
                     if (round_cnt >= ROUND_TICKS - 1) begin
@@ -197,10 +219,14 @@ module whack_a_mole_game #(
                             short_beep_active <= 1; // 触发短响
                         end
                         
-                        // 生成新地鼠：根据 LFSR 的值决定哪个位置出现及大小（大地鼠/小地鼠）
+                        // 生成新地鼠：普通模式每轮 1 只（位置/大小由 LFSR 决定）；
+                        // 困难模式每轮 2 只（位置必不同），第二只固定为小地鼠，
+                        // 保证同屏至多只有一只大地鼠
                         for (int i = 0; i < 4; i++) begin
-                            if (i == lfsr[1:0])
+                            if (i == spawn_pos1)
                                 mole_hp[i] <= (lfsr[3:2] == 2'b11) ? 2'd2 : 2'd1;
+                            else if (hard_mode_sync[1] && i == spawn_pos2)
+                                mole_hp[i] <= 2'd1;
                             else
                                 mole_hp[i] <= 2'd0;
                         end

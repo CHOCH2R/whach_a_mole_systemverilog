@@ -17,6 +17,7 @@ module whack_a_mole_game #(
     input  logic        rst_n,
 
     input  logic [3:0]  key,     // 4 hit keys, mapped to positions SM4~SM1
+    input  logic        hard_mode, // Hard-mode switch: 1 = two moles per round (at most one big), 0 = classic single-mole mode
 
     output logic [3:0]  led,     // 4 LEDs showing remaining chances M
     output logic [6:0]  seg,     // 7-segment segment outputs (a-g)
@@ -49,7 +50,7 @@ module whack_a_mole_game #(
     // ============================================================
     logic [$clog2(ROUND_TICKS):0] round_cnt;    // Per-round mole timer
     logic [2:0] chance_m;                       // Remaining chances M (0~4)
-    logic [5:0] kill_n;                         // Cleared-mole count N (0~20)
+    logic [5:0] kill_n;                         // Cleared-mole count N (0~21: a hard-mode double kill can overshoot WIN_TARGET by 1)
     logic [1:0] mole_hp [3:0];                  // Mole HP at each of the 4 positions (0: none, 1: small, 2: big)
     logic [7:0] lfsr;                           // Linear feedback shift register for pseudo-random numbers
 
@@ -127,6 +128,19 @@ module whack_a_mole_game #(
         end
     end
 
+    // Hard-mode switch synchronizer: the external DIP switch is an asynchronous input, two flops remove metastability
+    logic [1:0] hard_mode_sync;
+    always_ff @(posedge clk or negedge rst_n) begin
+        if (!rst_n) hard_mode_sync <= 2'b00;
+        else        hard_mode_sync <= {hard_mode_sync[0], hard_mode};
+    end
+
+    // Spawn position decode: the first mole's position is lfsr[1:0];
+    // the second position = first position XOR a non-zero offset, guaranteeing the two positions always differ
+    logic [1:0] spawn_pos1, spawn_pos2;
+    assign spawn_pos1 = lfsr[1:0];
+    assign spawn_pos2 = spawn_pos1 ^ ((lfsr[5:4] == 2'b00) ? 2'b01 : lfsr[5:4]);
+
     // ============================================================
     // 7. Main game FSM
     // ============================================================
@@ -156,6 +170,17 @@ module whack_a_mole_game #(
     // ============================================================
     // 8. Core game counting and judging logic
     // ============================================================
+    // Number of moles fully cleared this cycle (HP 1->0). In hard mode two
+    // moles can be killed in the very same cycle, so the kills must be summed
+    // in parallel — repeatedly assigning kill_n inside the loop would drop one
+    logic [2:0] kills_now;
+    always_comb begin
+        kills_now = '0;
+        for (int i = 0; i < 4; i++)
+            if (key_press[i] && mole_hp[i] == 2'd1)
+                kills_now += 3'd1;
+    end
+
     always_ff @(posedge clk or negedge rst_n) begin
         if (!rst_n) begin
             chance_m <= MAX_CHANCE[2:0];
@@ -180,12 +205,10 @@ module whack_a_mole_game #(
                     // --- Hit detection ---
                     for (int i=0; i<4; i++) begin
                         if (key_press[i] && mole_hp[i] > 0) begin
-                            if (mole_hp[i] == 2'd1) begin
-                                kill_n <= kill_n + 1; // HP goes from 1 to 0: fully cleared, score +1
-                            end
                             mole_hp[i] <= mole_hp[i] - 1'b1; // Decrease HP (2->1 or 1->0)
                         end
                     end
+                    kill_n <= kill_n + kills_now; // HP going 1 to 0 means fully cleared, add to score
 
                     // --- Round timing and chance deduction ---
                     if (round_cnt >= ROUND_TICKS - 1) begin
@@ -197,10 +220,14 @@ module whack_a_mole_game #(
                             short_beep_active <= 1; // Trigger the short beep
                         end
 
-                        // Spawn a new mole: the LFSR value decides which position it appears at and its size (big/small)
+                        // Spawn new moles: classic mode spawns 1 per round (position/size from the LFSR);
+                        // hard mode spawns 2 per round (always at different positions), with the second
+                        // one fixed as a small mole so at most one big mole is on screen
                         for (int i = 0; i < 4; i++) begin
-                            if (i == lfsr[1:0])
+                            if (i == spawn_pos1)
                                 mole_hp[i] <= (lfsr[3:2] == 2'b11) ? 2'd2 : 2'd1;
+                            else if (hard_mode_sync[1] && i == spawn_pos2)
+                                mole_hp[i] <= 2'd1;
                             else
                                 mole_hp[i] <= 2'd0;
                         end
