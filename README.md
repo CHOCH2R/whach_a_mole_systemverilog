@@ -17,6 +17,7 @@ A complete, self-contained SystemVerilog RTL implementation of a classic **Whack
 | `README.md` | This document |
 | `readme_cn.md` | Chinese version of this document |
 | `assets/` | Post-implementation timing / utilization / power reports from Vivado |
+| `LICENSE` | MIT license |
 
 The two `.sv` files contain **byte-for-byte identical logic** — only the comment language differs. Use whichever you prefer; the top-level module in both is `whack_a_mole_game`.
 
@@ -185,4 +186,4 @@ The whole game fits in under 200 LUTs and 200 flip-flops with no BRAM or DSP usa
 
 ## License
 
-Released as open source for learning and reference. Feel free to use it in coursework, demos, and your own projects.
+This project is licensed under the [MIT License](./LICENSE) — free to use, modify, and distribute (in coursework, demos, and commercial projects alike), as long as the copyright notice is retained.
