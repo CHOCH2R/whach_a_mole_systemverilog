@@ -108,13 +108,15 @@ An 8-bit Fibonacci LFSR (taps 8, 6, 5, 4; seed `8'hA5`) runs at the full 50 MHz 
 When a round expires, `lfsr[1:0]` selects which of the 4 holes spawns the mole and `lfsr[3:2] == 2'b11` decides whether it is a big mole (25 % probability) or a small one (75 %).
 
 ### 4. Game FSM — 4 states
-```
-            any key                 N ≥ 20
-  ST_INIT ─────────► ST_RUN ───────────────► ST_WIN ──┐
-     ▲                  │                             │ music done
-     │                  │ M == 0                      │
-     ├──────────────────┼───────────► ST_LOSE ────────┤
-     └────────────────────────────────────────────────┘
+```mermaid
+stateDiagram-v2
+    direction LR
+    [*] --> ST_INIT
+    ST_INIT --> ST_RUN: any key pressed
+    ST_RUN --> ST_WIN: N ≥ 20 (win)
+    ST_RUN --> ST_LOSE: M == 0 (lose)
+    ST_WIN --> ST_INIT: music done (1.8 s)
+    ST_LOSE --> ST_INIT: music done (1.8 s)
 ```
 - `ST_INIT` — resets M, N, mole HP and all timers; displays `00`, all LEDs on; waits for any key.
 - `ST_RUN` — the main game loop (hit judging, round timing, spawning).
